@@ -27,6 +27,7 @@ def load_scenarios(path, warn=True):
             raise ScenarioError(f"duplicate scenario id {row['id']}")
         seen.add(row["id"])
         row.setdefault("factual_error", None)
+        row.setdefault("goal", None)
 
     if len(rows) != EXPECTED_ROWS:
         raise ScenarioError(f"expected {EXPECTED_ROWS} scenarios, found {len(rows)}")

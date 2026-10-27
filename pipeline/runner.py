@@ -5,12 +5,11 @@ systems marked `private: true`) with the model, settings, seed and timestamp.
 Rerunning skips anything already saved.
 """
 
-import shutil
 import sys
 from datetime import datetime, timezone
 
 from .adapters import PastedCSVAdapter, make_adapter
-from .project import append_jsonl, read_jsonl
+from .project import append_jsonl, archive_system, read_jsonl
 from .scenarios import load_scenarios
 
 
@@ -28,12 +27,17 @@ def select_systems(cfg, names=None):
     return systems
 
 
-def run(project, system_names=None, runs=None, replace=False, clients=None):
+def run(project, system_names=None, runs=None, replace=False, clients=None, scenario_ids=None):
     """Run scenarios through systems. `clients` maps system name to a fake client (tests)."""
     cfg = project.systems_config()
     defaults = cfg.get("defaults", {})
     n_runs = runs or defaults.get("runs", 3)
     scenarios = load_scenarios(project.scenarios_file)
+    if scenario_ids:
+        unknown = set(scenario_ids) - {sc["id"] for sc in scenarios}
+        if unknown:
+            raise SystemExit(f"unknown scenario(s): {sorted(unknown)}")
+        scenarios = [sc for sc in scenarios if sc["id"] in scenario_ids]
     clients = clients or {}
     totals = {"new": 0, "skipped": 0, "missing": 0, "errors": 0}
 
@@ -58,6 +62,16 @@ def run(project, system_names=None, runs=None, replace=False, clients=None):
                     f"[{name}] saved responses come from model version {sorted(old_versions)}, "
                     f"but the endpoint now reports {version!r}. The baseline has moved: rerun with "
                     f"--replace to archive the old responses and start this system again."
+                )
+            existing = _archive_system(out, name)
+
+        old_prompts = {_system_prompt(r["messages"]) for r in existing} - {getattr(adapter, "system_prompt", None)}
+        if old_prompts and not isinstance(adapter, PastedCSVAdapter):
+            if not replace:
+                raise SystemExit(
+                    f"[{name}] saved responses were run with a different system prompt than "
+                    f"config/systems.yaml now sets. Rerun with --replace to archive the old "
+                    f"responses and start this system again."
                 )
             existing = _archive_system(out, name)
 
@@ -107,15 +121,14 @@ def run(project, system_names=None, runs=None, replace=False, clients=None):
     return totals
 
 
+def _system_prompt(messages):
+    return next((m["content"] for m in messages if m["role"] == "system"), None)
+
+
 def _archive_system(path, system):
-    """Move one system's responses out of the live file into an archive file."""
-    rows = read_jsonl(path)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    archive = path.with_name(f"responses.archived-{system}-{stamp}.jsonl")
-    shutil.copy(path, archive)
-    keep = [r for r in rows if r["system"] != system]
-    path.write_text("")
-    for r in keep:
-        append_jsonl(path, r)
-    print(f"[{system}] archived old responses to {archive.name}")
+    """Archive one system's responses and their judge scores.
+
+    Judge scores are keyed by response key, so leaving them would attach old scores to new responses.
+    """
+    archive_system([path, path.with_name("judge_scores.jsonl")], system)
     return []

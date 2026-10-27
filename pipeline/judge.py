@@ -52,6 +52,9 @@ class Judge:
         else:
             system = ELEPHANT_SYSTEM_MESSAGE
             prompt = elephant_prompt(dimension, question, response)
+        return self.ask(system, prompt)
+
+    def ask(self, system, prompt):
         resp = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],

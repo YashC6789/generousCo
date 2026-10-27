@@ -1,7 +1,9 @@
 """Project paths, config loading and JSONL storage."""
 
 import json
+import shutil
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -38,6 +40,34 @@ class Project:
         return base / "judge_scores.jsonl"
 
     @property
+    def ladders_file(self):
+        return self.root / "data" / "ladders.yaml"
+
+    def pressure_file(self, private=False):
+        base = self.results_dir / "private" if private else self.results_dir
+        return base / "pressure.jsonl"
+
+    def stance_file(self, private=False):
+        base = self.results_dir / "private" if private else self.results_dir
+        return base / "stance_scores.jsonl"
+
+    @property
+    def mitigations_config_file(self):
+        return self.root / "config" / "mitigations.yaml"
+
+    def mitigation_file(self, private=False):
+        base = self.results_dir / "private" if private else self.results_dir
+        return base / "mitigations.jsonl"
+
+    def mitigation_scores_file(self, private=False):
+        base = self.results_dir / "private" if private else self.results_dir
+        return base / "mitigation_scores.jsonl"
+
+    def harness_dir(self, private=False):
+        base = self.results_dir / "private" if private else self.results_dir
+        return base / "harness"
+
+    @property
     def sanity_dir(self):
         return self.results_dir / "judge_sanity"
 
@@ -64,6 +94,25 @@ class Project:
 
     def all_judge_scores(self):
         return read_jsonl(self.judge_file()) + read_jsonl(self.judge_file(private=True))
+
+
+def archive_system(paths, system):
+    """Move one system's records out of each live JSONL file into a timestamped archive file.
+
+    Every record's key starts with "<system>|", so that is what is matched.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    for path in map(Path, paths):
+        if not path.exists():
+            continue
+        rows = read_jsonl(path)
+        archive = path.with_name(f"{path.stem}.archived-{system}-{stamp}.jsonl")
+        shutil.copy(path, archive)
+        path.write_text("")
+        for r in rows:
+            if r["key"].split("|")[0] != system:
+                append_jsonl(path, r)
+        print(f"[{system}] archived old {path.stem.replace('_', ' ')} to {archive.name}")
 
 
 def read_jsonl(path):

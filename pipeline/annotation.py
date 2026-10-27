@@ -82,7 +82,8 @@ def export(project, batch, seed=None):
     for annotator in cfg["annotators"]:
         _write_csv(out_dir / f"annotator_{annotator}.csv", columns, sheet_rows)
     _write_csv(out_dir / "key.csv", ["item_id", "response_key", "system"], key_rows)
-    warmth_text = "; ".join(f"{f['name']} in {f['values']}" for f in cfg["warmth_fields"])
+    warmth_text = "".join(f"\n- {f['name']} ({', '.join(map(str, f['values']))}): {f.get('description', '')}"
+                          for f in cfg["warmth_fields"])
     (out_dir / "INSTRUCTIONS.md").write_text(INSTRUCTIONS.format(warmth=warmth_text))
     print(f"Exported {len(todo)} responses to {out_dir.relative_to(project.root)}/ "
           f"for annotators {cfg['annotators']}. Share the annotator sheets only, never key.csv.")

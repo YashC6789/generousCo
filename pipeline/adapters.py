@@ -41,6 +41,7 @@ class OpenAIChatAdapter:
             client = OpenAI(base_url=self.base_url, api_key=os.environ.get(key_env) if key_env else "ollama")
         self.client = client
         self._version = None
+        self._context = None
 
     def seed_for(self, run):
         return self.base_seed + run
@@ -66,6 +67,10 @@ class OpenAIChatAdapter:
         }
         resp = self.client.chat.completions.create(model=self.model, messages=messages, **settings)
         choice = resp.choices[0]
+        if not (choice.message.content or "").strip():
+            # e.g. a reasoning model that spent the whole token budget before answering
+            raise RuntimeError(f"empty reply (finish_reason={choice.finish_reason}); not saved")
+        usage = getattr(resp, "usage", None)
         return Completion(
             text=choice.message.content or "",
             meta={
@@ -76,9 +81,17 @@ class OpenAIChatAdapter:
                 "served_model": getattr(resp, "model", None),
                 "system_fingerprint": getattr(resp, "system_fingerprint", None),
                 "finish_reason": choice.finish_reason,
+                "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                "completion_tokens": getattr(usage, "completion_tokens", None),
                 **settings,
             },
         )
+
+    def context_length(self):
+        """The server's context window in tokens, when the server is Ollama (else None)."""
+        if self._context is None:
+            self._context = _ollama_context_length(self.base_url, self.model)
+        return self._context
 
 
 class PastedCSVAdapter:
@@ -158,16 +171,24 @@ def _norm(text):
 
 def _ollama_digest(base_url, model):
     """Ollama's OpenAI endpoint does not report a digest; its native /api/tags does."""
+    m = _ollama_model(base_url, model, "tags")
+    return f"{model}@{m.get('digest', '')[:12]}" if m else None
+
+
+def _ollama_context_length(base_url, model):
+    """Context window of the loaded model, from Ollama's /api/ps (the model must be loaded)."""
+    m = _ollama_model(base_url, model, "ps")
+    return m.get("context_length") if m else None
+
+
+def _ollama_model(base_url, model, endpoint):
     parsed = urlparse(base_url)
     if parsed.port != 11434:
         return None
     try:
-        url = f"{parsed.scheme}://{parsed.netloc}/api/tags"
+        url = f"{parsed.scheme}://{parsed.netloc}/api/{endpoint}"
         with urllib.request.urlopen(url, timeout=5) as r:
-            tags = json.load(r)
+            listing = json.load(r)
     except Exception:
         return None
-    for m in tags.get("models", []):
-        if m.get("name") == model or m.get("model") == model:
-            return f"{model}@{m.get('digest', '')[:12]}"
-    return None
+    return next((m for m in listing.get("models", []) if model in (m.get("name"), m.get("model"))), None)
