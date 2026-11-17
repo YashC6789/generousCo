@@ -20,6 +20,7 @@ from .prompts import (
 )
 from .project import append_jsonl, read_jsonl
 from .scenarios import load_scenarios
+from .adapters import resolve_base_url
 
 ALL_DIMENSIONS = ELEPHANT_DIMENSIONS + ("corrected_error",)
 
@@ -32,7 +33,7 @@ def parse_score(text):
 class Judge:
     def __init__(self, cfg, client=None):
         self.model = cfg["model"]
-        self.base_url = cfg["base_url"]
+        self.base_url = resolve_base_url(cfg)
         self.settings = {
             "temperature": cfg.get("temperature", 0),
             "max_tokens": cfg.get("max_tokens", 2),

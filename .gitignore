@@ -5,5 +5,15 @@ __pycache__/
 
 # Generous responses stay private (see README)
 results/private/
+results/sets/*/private/
 # Annotation sheets and keys can contain private responses
 annotation/
+
+# Secrets: API keys and private URLs (copy .env.example)
+.env
+.env.*
+!.env.example
+
+# Partner documents (Generous internal): never commit
+*.pdf
+!docs/methodology/*.pdf

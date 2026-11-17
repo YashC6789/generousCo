@@ -71,6 +71,8 @@ def project(tmp_path):
     for d in ("config", "data", "third_party"):
         shutil.copytree(REPO / d, tmp_path / d)
     cfg = yaml.safe_load((tmp_path / "config/systems.yaml").read_text())
+    # Never let a test reach a real API through variables set in the shell or .env.
+    cfg["systems"] = [s for s in cfg["systems"] if not s.get("base_url_env")]
     for s in cfg["systems"]:
         if s["adapter"] == "openai":
             s["base_url"] = url
@@ -437,3 +439,146 @@ def test_report_builds_from_saved_results(project):
     data = json.loads(re.search(r"const D = (\{.*?\});\n", page, re.S).group(1))
     assert data["phase2"]["conversations"] and data["phase3"]["summary"]
     assert "coach reply to" in json.dumps(data["phase2"]["text"])  # public system: reply text included
+
+
+def test_env_file_loads_without_overriding_the_shell(tmp_path, monkeypatch):
+    from pipeline.project import load_env_file
+
+    monkeypatch.delenv("PING_TEST_KEY", raising=False)
+    monkeypatch.setenv("PING_TEST_SHELL", "from-shell")
+    (tmp_path / ".env").write_text('# comment\nexport PING_TEST_KEY="secret"\nPING_TEST_SHELL=from-file\nEMPTY=\n')
+    assert load_env_file(tmp_path / ".env") == ["PING_TEST_KEY"]
+    import os
+    assert os.environ["PING_TEST_KEY"] == "secret" and os.environ["PING_TEST_SHELL"] == "from-shell"
+    assert "EMPTY" not in os.environ
+    monkeypatch.delenv("PING_TEST_KEY")
+
+
+def test_ping_api_system_from_env(project, monkeypatch, capsys):
+    from pipeline.ping import ping
+
+    cfg = yaml.safe_load(project.systems_file.read_text())
+    cfg["systems"].append({"name": "generous-coach", "adapter": "openai", "base_url_env": "PING_TEST_URL",
+                           "api_key_env": "PING_TEST_KEY", "model": "kai", "private": True,
+                           "omit_params": ["seed"]})
+    project.systems_file.write_text(yaml.safe_dump(cfg))
+    monkeypatch.delenv("PING_TEST_URL", raising=False)
+    monkeypatch.delenv("PING_TEST_KEY", raising=False)
+
+    # Unset variables: skipped when running every system, an error when named.
+    assert runner.run(project, runs=1)["new"] == 2 * 12
+    assert not ping(project, ["generous-coach"])
+    assert "PING_TEST_URL is not set" in capsys.readouterr().out
+
+    monkeypatch.setenv("PING_TEST_URL", project.url)
+    monkeypatch.setenv("PING_TEST_KEY", "gen_test_x")
+    assert ping(project, ["generous-coach"], save=True)
+    out = capsys.readouterr().out
+    assert "seed=None" in out and "gen_test_x" not in out  # seed omitted; key never printed
+    saved = json.loads(next((project.results_dir / "private/api_test").glob("generous-coach-*.json")).read_text())
+    assert saved["model"] == "kai" and "seed" not in saved and saved["base_url"] == project.url
+    assert not project.responses_file(private=True).exists()  # a ping never enters the data
+
+
+def test_base_url_expands_env(monkeypatch):
+    from pipeline.adapters import _ollama_model, expand_env
+
+    monkeypatch.delenv("OLLAMA_URL", raising=False)
+    assert expand_env("${OLLAMA_URL:-http://localhost:11434}/v1/") == "http://localhost:11434/v1/"
+    monkeypatch.setenv("OLLAMA_URL", "http://127.0.0.1:52011")
+    assert expand_env("${OLLAMA_URL:-http://localhost:11434}/v1/") == "http://127.0.0.1:52011/v1/"
+    with pytest.raises(RuntimeError, match="NOPE_UNSET"):
+        expand_env("${NOPE_UNSET}/v1/")
+    # Ollama's native API is only asked on a local server or port 11434, never a hosted API.
+    assert _ollama_model("https://api.example.com/v1/", "m", "tags") is None
+
+
+def test_models_lists_local_systems_and_judges(project):
+    from pipeline.__main__ import ollama_models
+
+    cfg = yaml.safe_load(project.systems_file.read_text())
+    cfg["systems"].append({"name": "big", "adapter": "openai", "model": "mistral-large:123b",
+                           "base_url": "${OLLAMA_URL:-http://localhost:11434}/v1/"})
+    cfg["systems"].append({"name": "hosted", "adapter": "openai", "model": "gpt-x",
+                           "base_url": "https://api.example.com/v1/"})
+    project.systems_file.write_text(yaml.safe_dump(cfg))
+    assert ollama_models(project, ["big", "hosted"]) == ["mistral-large:123b", "qwen2.5:7b", "gemma3:12b"]
+
+
+def test_merge_results_from_another_machine(project, tmp_path):
+    from pipeline.merge import merge
+
+    runner.run(project, ["mistral-7b"], runs=1)
+    assert judge.judge_all(project)
+    # The "GPU machine": a copy of results/ with another system and a sanity file added.
+    other = tmp_path / "gpu_results"
+    shutil.copytree(project.results_dir, other)
+    rows = read_jsonl(other / "responses.jsonl")
+    with (other / "responses.jsonl").open("a") as f:
+        for r in rows:
+            f.write(json.dumps({**r, "key": r["key"].replace("mistral-7b", "mistral-large-123b", 1),
+                                "system": "mistral-large-123b"}) + "\n")
+    (other / "jobs/123").mkdir(parents=True)
+    (other / "jobs/123/ping.txt").write_text("ok")
+
+    totals, conflicts = merge(project, other)
+    assert totals["records"] == 12 and totals["files"] == 1 and not conflicts
+    assert merge(project, other)[0] == {"records": 0, "files": 0}  # idempotent
+    systems = {r["system"] for r in read_jsonl(project.responses_file())}
+    assert systems == {"mistral-7b", "mistral-large-123b"}
+
+    # Same key, different reply: that system is refused, not mixed.
+    rows = read_jsonl(other / "responses.jsonl")
+    (other / "responses.jsonl").write_text("".join(
+        json.dumps({**r, "response": "different"} if r["system"] == "mistral-7b" else r) + "\n" for r in rows))
+    with (other / "judge_scores.jsonl").open("a") as f:
+        f.write(json.dumps({"key": "mistral-7b|9.9|0|validation|x", "score": 1}) + "\n")
+    totals, conflicts = merge(project, other)
+    assert totals["records"] == 0 and "mistral-7b" in conflicts
+
+
+def test_scenario_sets_keep_data_apart(project):
+    from dataclasses import replace
+
+    v2 = replace(project, scenario_set="v2")
+    shutil.copytree(REPO / "data/sets", project.root / "data/sets", dirs_exist_ok=True)
+    assert v2.scenarios_file == project.root / "data/sets/v2/scenarios.yaml"
+    assert v2.results_dir == project.root / "results/sets/v2" and project.results_dir == project.root / "results"
+    rows = load_scenarios(v2.scenarios_file, warn=False)
+    assert len(rows) == 12 and {r["core_scenario"] for r in rows} == {"mentor", "mental", "physical", "social"}
+    assert all(sum(r["family"] == f for r in rows) == 3 for f in {r["family"] for r in rows})
+
+    runner.run(project, ["mistral-7b"], runs=1)
+    runner.run(v2, ["mistral-7b"], runs=1)
+    assert {r["scenario_id"] for r in read_jsonl(v2.responses_file())} == {r["id"] for r in rows}
+    assert {r["scenario_id"] for r in read_jsonl(project.responses_file())} == {
+        r["id"] for r in load_scenarios(project.scenarios_file, warn=False)}
+
+
+def test_message_cap_and_critique_as_messages(project):
+    from pipeline import mitigate, pressure
+
+    cfg = yaml.safe_load(project.systems_file.read_text())
+    next(s for s in cfg["systems"] if s["name"] == "mistral-7b")["max_message_chars"] = 4000
+    project.systems_file.write_text(yaml.safe_dump(cfg))
+    adapter = make_test_adapter(project, "mistral-7b")
+    with pytest.raises(ValueError, match="max_message_chars"):
+        adapter.complete([{"role": "user", "content": "x" * 4001}], 0)
+
+    runner.run(project, ["mistral-7b"], runs=1, scenario_ids=["1.1"])
+    pressure.run_pressure(project, ["mistral-7b"], runs=1, scenario_ids=["1.1"])
+    mitigate.run_mitigations(project, ["mistral-7b"], ["self_critique"], runs=1, scenario_ids=["1.1"])
+    turns = [r for r in read_jsonl(project.mitigation_file()) if r["mitigation"] == "self_critique"]
+    assert len(turns) == 6 and all(t["critique_context"] == "messages" and t["critique_parsed"] for t in turns)
+    # Removing the cap changes how the critique is sent, so the saved turns are stale.
+    next(s for s in cfg["systems"] if s["name"] == "mistral-7b").pop("max_message_chars")
+    project.systems_file.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(SystemExit, match="no longer match"):
+        mitigate.run_mitigations(project, ["mistral-7b"], ["self_critique"], runs=1, scenario_ids=["1.1"])
+
+
+def make_test_adapter(project, name):
+    from pipeline.adapters import make_adapter
+
+    cfg = project.systems_config()
+    return make_adapter(next(s for s in cfg["systems"] if s["name"] == name), cfg["defaults"], project.root)

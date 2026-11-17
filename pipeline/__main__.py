@@ -1,5 +1,10 @@
-"""Command line: python -m pipeline <step>
+"""Command line: python -m pipeline [--set NAME] <step>
 
+--set NAME runs any step on the scenario set in data/sets/NAME/ and keeps its results in
+results/sets/NAME/; without it, data/scenarios.yaml and results/ are used.
+
+  ping --systems NAME [--message TEXT] [--save]
+                             API test: one message, print the reply (not saved to results)
   scenarios                  step 1: check the scenario file
   run [--systems/--scenarios] steps 2-3: run scenarios through systems (skips saved)
   judge                      step 4: score every response with the local judge
@@ -27,18 +32,29 @@ Phase 3 (low-cost fixes, config/mitigations.yaml):
                                     every step for a system, then a snapshot compared with the last one
 
   report                     one HTML page explaining every phase's results, from saved files
+
+GPU machine (jobs/):
+  models --systems NAME ...  the Ollama models a job needs (those systems + the judges)
+  merge PATH                 add records from another machine's results/ copy, never overwriting
 """
 
 import argparse
 import sys
 
-from .project import Project
+from .project import Project, load_env_file
 
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="python -m pipeline", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--set", dest="scenario_set", metavar="NAME",
+                   help="scenario set: data/sets/NAME/, results in results/sets/NAME/ (default: data/scenarios.yaml)")
     sub = p.add_subparsers(dest="cmd", required=True)
+    pg = sub.add_parser("ping")
+    pg.add_argument("--systems", nargs="+", required=True, help="system names from config/systems.yaml")
+    pg.add_argument("--message", help="what the user says (default: the quit-my-job example)")
+    pg.add_argument("--save", action="store_true",
+                    help="also write the reply to results/api_test/ (results/private/ for private systems)")
     sub.add_parser("scenarios")
     r = sub.add_parser("run")
     r.add_argument("--systems", nargs="+", help="system names from config/systems.yaml (default: all)")
@@ -90,9 +106,19 @@ def main(argv=None):
     h.add_argument("--runs", type=int, help="runs per scenario (default: config)")
     h.add_argument("--replace", action="store_true", help="prompt or model changed: archive old replies and rerun")
     sub.add_parser("report")
+    mo = sub.add_parser("models")
+    mo.add_argument("--systems", nargs="+", required=True, help="system names from config/systems.yaml")
+    mg = sub.add_parser("merge")
+    mg.add_argument("path", help="a copy of another machine's results/ folder")
     args = p.parse_args(argv)
 
-    project = Project()
+    project = Project(scenario_set=args.scenario_set)
+    if not project.scenarios_file.exists():
+        raise SystemExit(f"no scenario set {args.scenario_set!r}: {project.scenarios_file} does not exist")
+    load_env_file(project.root / ".env")  # API keys and private URLs; git-ignored
+    if args.cmd == "ping":
+        from .ping import ping
+        return 0 if ping(project, args.systems, args.message, args.save) else 1
     if args.cmd == "scenarios":
         from .scenarios import check
         check(project)
@@ -121,10 +147,26 @@ def main(argv=None):
     elif args.cmd == "report":
         from .report import build_report
         build_report(project)
+    elif args.cmd == "models":
+        print("\n".join(ollama_models(project, args.systems)))
+    elif args.cmd == "merge":
+        from .merge import merge
+        merge(project, args.path)
     elif args.cmd == "harness":
         from .harness import harness
         return 0 if harness(project, args.systems, args.replace, args.fixes, args.runs) else 1
     return 0
+
+
+def ollama_models(project, system_names):
+    """Models served by the local Ollama: the named systems' and every judge's."""
+    from .runner import select_systems
+
+    cfg = project.systems_config()
+    local = [s for s in select_systems(cfg, system_names) if s.get("adapter") == "openai"
+             and ("OLLAMA_URL" in str(s.get("base_url", "")) or ":11434" in str(s.get("base_url", "")))]
+    judges = [cfg[k] for k in ("judge", "stance_judge", "warmth_judge") if cfg.get(k)]
+    return list(dict.fromkeys(m["model"] for m in local + judges))
 
 
 def _mitigate(project, args):

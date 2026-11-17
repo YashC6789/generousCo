@@ -86,12 +86,30 @@ def turn_messages(adapter, fix, scenario, ladder, replies, turn):
     return messages
 
 
+def critique_context(adapter):
+    """How the critique pass sees the conversation.
+
+    inline:   one message holding the whole transcript (the default).
+    messages: the conversation as ordinary messages, then one message with the critique
+              instruction and the draft. Used for endpoints that cap the length of a single
+              message (max_message_chars), where an inline transcript stops fitting by turn 3-5.
+    """
+    return "messages" if getattr(adapter, "max_message_chars", None) else "inline"
+
+
 def critique(adapter, fix, messages, draft, run, scenario_id):
     """Second pass: returns (reply to send, critique completion, whether the marker was found)."""
-    transcript = "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages if m["role"] != "system")
-    prompt = fix["critique"].format(system_prompt=system_prompt_for(adapter, fix) or "(none)",
-                                    transcript=transcript, draft=draft)
-    result = adapter.complete([{"role": "user", "content": prompt}], run, scenario_id=scenario_id)
+    system = system_prompt_for(adapter, fix) or "(none)"
+    if critique_context(adapter) == "messages":
+        history = [m for m in messages if m["role"] != "system"]
+        prompt = fix["critique"].format(system_prompt=system, draft=draft,
+                                        transcript="(the messages above, ending with the user's latest message)")
+        call = history + [{"role": "user", "content": prompt}]
+    else:
+        transcript = "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages if m["role"] != "system")
+        call = [{"role": "user", "content": fix["critique"].format(system_prompt=system, transcript=transcript,
+                                                                   draft=draft)}]
+    result = adapter.complete(call, run, scenario_id=scenario_id)
     marker = fix["final_marker"]
     if marker in result.text and result.text.rsplit(marker, 1)[1].strip():
         return result.text.rsplit(marker, 1)[1].strip(), result, True
@@ -173,14 +191,15 @@ def run_mitigations(project, system_names=None, fix_names=None, runs=None, repla
                             if fix.get("critique"):
                                 final, cres, parsed = critique(adapter, fix, messages, result.text, r, sc["id"])
                                 check_context(adapter, cres, key)
-                                record = {"draft": result.text, "critique": cres.text, "critique_parsed": parsed}
+                                record = {"draft": result.text, "critique": cres.text, "critique_parsed": parsed,
+                                          "critique_context": critique_context(adapter)}
                                 totals["critique_unparsed"] += not parsed
                             else:
                                 final = result.text
                         except Exception as e:
                             if type(e).__name__ == "APIConnectionError":
                                 raise SystemExit(
-                                    f"[{name}] cannot reach {sys_cfg.get('base_url')}. "
+                                    f"[{name}] cannot reach {adapter.base_url}. "
                                     f"Is the server running (e.g. `ollama serve`) and the model pulled?"
                                 ) from e
                             print(f"[{name}] {key}: ERROR {e}; the rest of this conversation is left for a rerun",
@@ -220,6 +239,7 @@ def _stale_turns(saved, adapter, fixes, scenarios, ladders, version):
                 and rec["fix"] == fix and rec["model_version"] == version
                 and all(u in replies for u in range(t))
                 and rec["messages"] == turn_messages(adapter, fix, sc, ladder, replies, t)
+                and (not fix.get("critique") or rec.get("critique_context", "inline") == critique_context(adapter))
             )
             if not fresh:
                 stale.append(rec["key"])

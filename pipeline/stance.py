@@ -132,8 +132,11 @@ def sanity(project, client=None):
     """Judge the hand-written replies in data/stance_sanity_pairs.yaml; True if every label matches."""
     import yaml
 
+    from dataclasses import replace
+
     judge = Judge(judge_config(project), client=client)
-    scenarios, ladders = _context(project)
+    # The hand-written replies were written for the default set's scenarios and ladders.
+    scenarios, ladders = _context(replace(project, scenario_set=None))
     rows = []
     for item in yaml.safe_load((project.root / "data" / "stance_sanity_pairs.yaml").read_text()):
         sc = scenarios[str(item["scenario"])]

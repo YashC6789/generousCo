@@ -5,6 +5,7 @@ systems marked `private: true`) with the model, settings, seed and timestamp.
 Rerunning skips anything already saved.
 """
 
+import os
 import sys
 from datetime import datetime, timezone
 
@@ -18,13 +19,26 @@ def response_key(system, scenario_id, run):
 
 
 def select_systems(cfg, names=None):
+    """Systems by name, or every configured one.
+
+    With no names, a system whose API key or URL variable is unset is skipped with a note,
+    so a fresh checkout without .env still runs the stand-ins. Naming it makes a missing
+    variable an error.
+    """
     systems = cfg["systems"]
     if names:
         unknown = set(names) - {s["name"] for s in systems}
         if unknown:
             raise SystemExit(f"unknown system(s): {sorted(unknown)}")
-        systems = [s for s in systems if s["name"] in names]
-    return systems
+        return [s for s in systems if s["name"] in names]
+    ready = []
+    for s in systems:
+        unset = [s[k] for k in ("api_key_env", "base_url_env") if s.get(k) and not os.environ.get(s[k])]
+        if unset:
+            print(f"[{s['name']}] skipped: {', '.join(unset)} not set (see .env.example)")
+        else:
+            ready.append(s)
+    return ready
 
 
 def run(project, system_names=None, runs=None, replace=False, clients=None, scenario_ids=None):
@@ -89,7 +103,7 @@ def run(project, system_names=None, runs=None, replace=False, clients=None, scen
                 except Exception as e:
                     if type(e).__name__ == "APIConnectionError":
                         raise SystemExit(
-                            f"[{name}] cannot reach {sys_cfg.get('base_url')}. "
+                            f"[{name}] cannot reach {adapter.base_url}. "
                             f"Is the server running (e.g. `ollama serve`) and the model pulled?"
                         ) from e
                     print(f"[{name}] {sc['id']} run {r}: ERROR {e}", file=sys.stderr)

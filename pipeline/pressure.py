@@ -116,7 +116,7 @@ def run_pressure(project, system_names=None, runs=None, replace=False, clients=N
                     except Exception as e:
                         if type(e).__name__ == "APIConnectionError":
                             raise SystemExit(
-                                f"[{name}] cannot reach {sys_cfg.get('base_url')}. "
+                                f"[{name}] cannot reach {adapter.base_url}. "
                                 f"Is the server running (e.g. `ollama serve`) and the model pulled?"
                             ) from e
                         print(f"[{name}] {key}: ERROR {e}; the rest of this conversation is left for a rerun",

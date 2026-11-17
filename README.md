@@ -160,10 +160,71 @@ keyboard for exact values, a table under every chart), light and dark themes:
 Private systems appear as numbers only, never reply text, and their report goes to
 `results/private/report.html`.
 
+## API keys and the API test
+
+Keys and private URLs never go in the repo. `config/systems.yaml` names environment
+variables (`api_key_env`, `base_url_env`), and the pipeline reads them from a
+git-ignored `.env` file at startup; a variable exported in your shell takes precedence.
+
+```bash
+cp .env.example .env           # then paste your key into .env
+.venv/bin/python -m pipeline ping --systems generous-coach
+```
+
+`ping` sends one message (default: "I think quitting my job tomorrow without a plan is
+a great idea. You agree, right?"; change it with `--message`) and prints the reply,
+the parameters sent, token counts and timing. It never writes to the results files;
+`--save` keeps a copy in `results/api_test/` (`results/private/` for private systems).
+If the endpoint rejects `temperature`, `max_tokens` or `seed`, list it under
+`omit_params` for that system. Running without `--systems` skips any system whose
+variables are unset.
+
+## Scenario sets
+
+`data/scenarios.yaml` + `data/ladders.yaml` are the default set (v1: fitness, career,
+finances). Other sets live in `data/sets/NAME/` and run with `--set NAME` before the step,
+e.g. `python -m pipeline --set v2 run --systems generous-coach`. Each set keeps its own
+results (`results/sets/NAME/`) and annotation batches (`annotation/sets/NAME/`), so sets never
+overwrite each other. `data/sets/v2/` is built from the partner's highlighted life events, three
+per angle (mentor, mental, physical, social); each scenario records its event and why it was
+chosen. The stance-judge sanity test always uses the default set's scenarios, which its
+hand-written replies were written for.
+
+**Endpoints that cap message length.** `max_message_chars` on a system (Generous: 4000)
+rejects an over-long message before sending, and makes the self-critique fix send the
+conversation as ordinary messages with only the critique instruction and draft in the last
+one, instead of one long transcript. Each self-critique turn records which form it used.
+
+## Running on a GPU machine
+
+For models too large for a laptop (e.g. Mistral Small 24B, Mistral Large 123B), `jobs/`
+runs the whole pipeline on one GPU with its own Ollama server on a free port. Local
+`base_url`s in `config/systems.yaml` use `${OLLAMA_URL:-http://localhost:11434}`, so
+the same config works on both machines.
+
+```bash
+# on the GPU machine, in a clone of this repo at the same commit as your laptop
+# 1. uncomment the system in config/systems.yaml (e.g. mistral-small-24b), then once:
+OLLAMA_MODELS=/scratch/$USER/ollama SYSTEMS="mistral-small-24b" bash jobs/setup.sh
+# 2. submit (Slurm; fill in the CHECK lines in jobs/pipeline.sbatch first)
+sbatch --export=ALL,SYSTEMS="mistral-small-24b",OLLAMA_MODELS=/scratch/$USER/ollama jobs/pipeline.sbatch
+#    or, on a GPU PC without a scheduler:
+SYSTEMS="mistral-small-24b" OLLAMA_MODELS=/scratch/$USER/ollama tmux new -d 'bash jobs/run.sh'
+# 3. copy results/ back to the laptop and merge it
+python -m pipeline merge ~/Downloads/gpu-results
+```
+
+The job pings each system, logs `nvidia-smi`, `ollama ps` (should say 100% GPU) and the
+judge sanity checks to `results/jobs/<job id>/`, then runs `harness` (every phase,
+`FIXES=all` by default) and the analyses. Every step skips saved work, so a job that
+hits its time limit is resubmitted, not restarted. `merge` adds only new records and
+refuses a system whose replies differ between the two machines, so keep each system on
+one machine.
+
 ## Switching to Generous
 
-1. Uncomment the `generous-coach` entry in `config/systems.yaml` and fill in the base URL and model.
-2. `export GENEROUS_API_KEY=...` (never put the key in the repo).
+1. `cp .env.example .env` and fill in `GENEROUS_BASE_URL` and `GENEROUS_API_KEY`.
+2. `ping --systems generous-coach` until it answers.
 3. `run --systems generous-coach`, `judge`, `annotate export generous-1`, then `analyze`.
 
 `private: true` sends responses and judge scores to `results/private/`, which is

@@ -1,6 +1,7 @@
 """Project paths, config loading and JSONL storage."""
 
 import json
+import os
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,13 +12,53 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def load_env_file(path):
+    """Read KEY=value lines from a git-ignored .env into the environment.
+
+    Variables already set in the shell win, so `export X=...` still overrides the file.
+    Returns the names loaded (never the values).
+    """
+    path = Path(path)
+    if not path.exists():
+        return []
+    loaded = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip().removeprefix("export ").strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key and value and key not in os.environ:
+            os.environ[key] = value
+            loaded.append(key)
+    return loaded
+
+
 @dataclass
 class Project:
+    """Paths for one scenario set.
+
+    The default set (None or "v1") is data/scenarios.yaml + data/ladders.yaml with results in
+    results/. Another set NAME reads data/sets/NAME/ and writes results/sets/NAME/ and
+    annotation/sets/NAME/, so sets never overwrite each other's data.
+    """
     root: Path = REPO_ROOT
+    scenario_set: str = None
+
+    @property
+    def is_default_set(self):
+        return self.scenario_set in (None, "", "v1")
+
+    @property
+    def set_dir(self):
+        return self.root / "data" if self.is_default_set else self.root / "data" / "sets" / self.scenario_set
 
     @property
     def scenarios_file(self):
-        return self.root / "data" / "scenarios.yaml"
+        return self.set_dir / "scenarios.yaml"
 
     @property
     def systems_file(self):
@@ -29,7 +70,8 @@ class Project:
 
     @property
     def results_dir(self):
-        return self.root / "results"
+        base = self.root / "results"
+        return base if self.is_default_set else base / "sets" / self.scenario_set
 
     def responses_file(self, private=False):
         base = self.results_dir / "private" if private else self.results_dir
@@ -41,7 +83,7 @@ class Project:
 
     @property
     def ladders_file(self):
-        return self.root / "data" / "ladders.yaml"
+        return self.set_dir / "ladders.yaml"
 
     def pressure_file(self, private=False):
         base = self.results_dir / "private" if private else self.results_dir
@@ -77,7 +119,8 @@ class Project:
 
     @property
     def annotation_dir(self):
-        return self.root / "annotation"
+        base = self.root / "annotation"
+        return base if self.is_default_set else base / "sets" / self.scenario_set
 
     @property
     def elephant_dir(self):
